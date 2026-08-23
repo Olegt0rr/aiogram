@@ -13,10 +13,6 @@ It also makes middlewares and filters more controllable, among other improvement
 
 On this page, you can read about the changes made in relation to the last stable 2.x version.
 
-.. note::
-
-    Feel free to contribute to this page, if you find something that is not mentioned here.
-
 .. danger::
 
     Most breaking changes on this page fall into two groups:
@@ -24,6 +20,10 @@ On this page, you can read about the changes made in relation to the last stable
     and code that **fails silently** — it imports and runs, but misbehaves only on
     specific updates or under specific conditions.
     The silent group is marked with warnings across this page; pay extra attention to it.
+
+.. note::
+
+    Feel free to contribute to this page, if you find something that is not mentioned here.
 
 
 Dependencies
@@ -36,7 +36,9 @@ Dependencies
 
   Note that the i18n API itself has also been changed, see :ref:`i18n migration <migration-i18n>` below.
 
-- aiogram 3.x requires :code:`aiohttp >= 3.9` (v2 worked with older versions).
+- aiogram 3.x requires a much newer aiohttp than v2 did
+  (:code:`aiohttp >= 3.9` at the time of writing — check aiogram's project metadata
+  for the current bounds).
   If your project uses aiohttp directly (for example, for a webhook web application),
   check your own code against the aiohttp changelog: arguments that were deprecated
   in older aiohttp versions have been removed (e.g. the :code:`loop=` argument of
@@ -132,13 +134,6 @@ If you stored data on the |Bot| instance because multiple bots shared one dispat
 move that data to a middleware or derive it from the :code:`bot` argument
 (e.g. keyed by :code:`bot.id`).
 
-Downloading files
------------------
-
-The v2 method :code:`bot.download_file_by_id` was removed;
-use :meth:`~aiogram.client.bot.Bot.download` which accepts
-both a file id and a :class:`~aiogram.types.file.File`-like object.
-
 
 Dispatcher
 ==========
@@ -179,16 +174,23 @@ schedule the work explicitly:
 
 .. code-block:: python
 
+    import asyncio
+
     @router.message(Command("slow"))
     async def handler(message: Message) -> None:
-        asyncio.create_task(do_slow_work(message.chat.id))
-        # keep a reference to the task if it must not be garbage-collected
+        task = asyncio.create_task(do_slow_work(message.chat.id))
+        background_tasks.add(task)  # keep a reference, tasks are weakly referenced
+        task.add_done_callback(background_tasks.discard)
+
+Note that an exception raised inside a detached task never reaches the aiogram error
+handlers — the update is already considered processed by then. Keep a reference to the
+task and handle (or at least log) errors inside it yourself.
 
 :code:`AllowedUpdates` helper is removed
 ----------------------------------------
 
 The v2 helper :code:`aiogram.types.AllowedUpdates` no longer exists.
-In v3 pass plain strings or :class:`aiogram.enums.UpdateType` members,
+In v3 pass plain strings or :class:`aiogram.enums.update_type.UpdateType` members,
 or resolve the list from your registered handlers via
 :meth:`~aiogram.dispatcher.router.Router.resolve_used_update_types`:
 
@@ -226,10 +228,42 @@ Filtering events
   For example instead of using :code:`@dp.message_handler(content_types=ContentType.PHOTO)`
   you should use :code:`@router.message(F.photo)`
 - Most common filters have been replaced with the "magic filter." (:ref:`Read more » <magic-filters>`)
-- By default, the message handler now receives any content type.
-  If you want a specific one, simply add the appropriate filters (Magic or any other).
 - Added the possibility to register global filters for each router, which helps to reduce code
   repetition and provides an easier way to control the purpose of each router.
+
+.. warning::
+
+    **A bare message handler now receives every content type.**
+
+    In v2, :code:`@dp.message_handler()` without filters was implicitly limited to
+    :code:`content_types=ContentType.TEXT` — it received **text messages only**.
+    In v3, :code:`@router.message()` without filters receives photos, stickers,
+    service messages and everything else as well, and on those updates
+    :code:`message.text` is :code:`None`.
+
+    Straightforwardly migrated code like :code:`message.text.lower()` therefore works
+    until the first non-text message arrives and then raises
+    :code:`AttributeError: 'NoneType' object has no attribute 'lower'`.
+
+    Add the content filter explicitly:
+
+    .. code-block:: python
+
+        # Version 2.x
+        @dp.message_handler()
+        async def handler(message: types.Message):
+            print(message.text.lower())
+
+    .. code-block:: python
+
+        # Version 3.x
+        @router.message(F.text)
+        async def handler(message: Message) -> None:
+            print(message.text.lower())
+
+    Use the matching magic filter for other content types
+    (:code:`F.photo`, :code:`F.document`, :code:`F.sticker`, ...), or keep the handler
+    unfiltered on purpose and guard every field access.
 
 The :code:`chat_type` filter
 ----------------------------
@@ -259,8 +293,9 @@ callback query handler will simply never match.
 The :code:`Text` filter
 -----------------------
 
-The v2 :code:`Text` filter has no equivalent in current 3.x releases
-(it existed in early 3.x versions and was removed in 3.4). Use the magic filter:
+The v2 :code:`Text` filter has no equivalent in v3: it was dropped during the 3.0 beta
+cycle (in 3.0.0b8), before the first stable 3.0 release, so it is not available in any
+stable 3.x version. Use the magic filter:
 
 .. code-block:: python
 
@@ -315,7 +350,8 @@ Default state filter behavior is inverted
 
     - In v2 a handler **without** a state filter ran only in the default (no) state;
       to run in any state you had to pass :code:`state="*"`.
-    - In v3 a handler **without** a :class:`~aiogram.filters.state.StateFilter` runs in **any** state.
+    - In v3 a handler **without** a :code:`StateFilter`
+      (:code:`from aiogram.filters import StateFilter`) runs in **any** state.
 
     After a naive migration, handlers start to trigger in situations where they were
     silently skipped before — e.g. a menu handler now fires in the middle of an FSM dialog.
@@ -335,7 +371,8 @@ Bot API
   `pydantic <https://docs.pydantic.dev/>`_.
   These API calls are also available as methods in the Bot class.
 - More pre-defined Enums have been added and moved to the `aiogram.enums` sub-package.
-  For example, the chat type enum is now :class:`aiogram.enums.ChatType` instead of :class:`aiogram.types.chat.ChatType`.
+  For example, the chat type enum is now :class:`aiogram.enums.chat_type.ChatType`
+  instead of :code:`aiogram.types.chat.ChatType`.
 - The HTTP client session has been separated into a container that can be reused
   across different Bot instances within the application.
 - API Exceptions are no longer classified by specific messages,
@@ -351,15 +388,56 @@ Renamed methods
 
 v2 kept some pre-Bot API 5.3 method names that are gone in v3:
 
-- :code:`kick_chat_member` -> :meth:`~aiogram.client.bot.Bot.ban_chat_member`
-- :code:`get_chat_members_count` -> :meth:`~aiogram.client.bot.Bot.get_chat_member_count`
-- :code:`set_sticker_set_thumb` -> :meth:`~aiogram.client.bot.Bot.set_sticker_set_thumbnail`
-- :code:`close_bot` -> :meth:`~aiogram.client.bot.Bot.close` (the Bot API :code:`close` method;
+- :code:`bot.kick_chat_member` -> :code:`bot.ban_chat_member`
+  (:class:`aiogram.methods.ban_chat_member.BanChatMember`)
+- :code:`bot.get_chat_members_count` -> :code:`bot.get_chat_member_count`
+  (:class:`aiogram.methods.get_chat_member_count.GetChatMemberCount`)
+- :code:`bot.set_sticker_set_thumb` -> :code:`bot.set_sticker_set_thumbnail`
+  (:class:`aiogram.methods.set_sticker_set_thumbnail.SetStickerSetThumbnail`)
+- :code:`bot.close_bot` -> :code:`bot.close`
+  (:class:`aiogram.methods.close.Close`, the Bot API :code:`close` method;
   to close the HTTP client session, use :code:`await bot.session.close()`)
-- :code:`download_file_by_id` -> :meth:`~aiogram.client.bot.Bot.download`
+- :code:`bot.download_file_by_id` -> :meth:`~aiogram.client.bot.Bot.download`,
+  which accepts both a file id and a :class:`~aiogram.types.file.File`-like object
 
 All other methods follow the current Bot API names — when in doubt, check the method
 list in the API reference rather than assuming the v2 name still exists.
+
+Renames and removals inside Telegram types
+------------------------------------------
+
+The same applies to shortcuts and fields of the types themselves:
+
+- :code:`chat.kick(...)` -> :meth:`aiogram.types.chat.Chat.ban`
+  (:meth:`aiogram.types.chat.Chat.unban` kept its name).
+- :code:`ChatPermissions.can_send_media_messages` no longer exists: Bot API 6.5 split it
+  into the granular :code:`can_send_audios`, :code:`can_send_documents`,
+  :code:`can_send_photos`, :code:`can_send_videos`, :code:`can_send_video_notes` and
+  :code:`can_send_voice_notes` flags.
+
+.. warning::
+
+    Telegram types in v3 accept extra fields, so
+    :code:`ChatPermissions(can_send_media_messages=True)` does **not** raise a validation
+    error. The unknown field is sent to Telegram, ignored there, and the permissions you
+    meant to grant are silently not applied. Replace it with the granular flags:
+
+    .. code-block:: python
+
+        # Version 2.x
+        permissions = types.ChatPermissions(can_send_media_messages=True)
+
+    .. code-block:: python
+
+        # Version 3.x
+        permissions = ChatPermissions(
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+        )
 
 Constructors of types and methods are keyword-only
 --------------------------------------------------
@@ -382,15 +460,51 @@ now, so positional arguments are not accepted:
 Positional construction fails with a validation error at runtime, so this cannot be
 caught by import checks — grep for positional usages of Telegram types while migrating.
 
+Positional arguments of API calls now bind to different parameters
+-------------------------------------------------------------------
+
+.. warning::
+
+    This is the quiet counterpart of the rule above. **Calls** of Bot API methods and
+    of type shortcuts still accept positional arguments — and that is exactly the
+    problem. Telegram keeps inserting new parameters into the middle of existing
+    signatures, so v2-era positional calls keep working, but every value lands in the
+    wrong parameter:
+
+    - The second parameter of :code:`bot.edit_message_text()` is now
+      :code:`business_connection_id` (it was :code:`chat_id` in v2), so
+      :code:`bot.edit_message_text(text, chat_id, message_id)` sends your chat id as a
+      business connection id.
+    - The second parameter of :meth:`aiogram.types.message.Message.answer` is now
+      :code:`direct_messages_topic_id` (it was :code:`parse_mode` in v2), so
+      :code:`message.answer(text, "HTML")` passes the parse mode as a topic id.
+
+    Pass **all** Bot API method arguments as keywords, and audit every positional call
+    while migrating:
+
+    .. code-block:: python
+
+        # Version 2.x
+        await bot.edit_message_text("New text", chat_id, message_id)
+        await message.answer("<b>Hi</b>", "HTML")
+
+    .. code-block:: python
+
+        # Version 3.x
+        await bot.edit_message_text(text="New text", chat_id=chat_id, message_id=message_id)
+        await message.answer(text="<b>Hi</b>", parse_mode="HTML")
+
 
 Telegram objects behavior
 =========================
 
-Objects are immutable (frozen)
-------------------------------
+Incoming objects are immutable (frozen)
+---------------------------------------
 
-All Telegram types in v3 are immutable pydantic models. Any code that mutated objects
-in-place (most commonly tests) must be updated:
+Telegram types in v3 are pydantic models, and the types you **receive** from Telegram
+are frozen: :code:`Message`, :code:`CallbackQuery`, :code:`User`, :code:`Chat` and every
+other subclass of :code:`aiogram.types.base.TelegramObject`. Any code that mutated such
+objects in-place (most commonly tests) must be updated:
 
 .. code-block:: python
 
@@ -402,22 +516,81 @@ in-place (most commonly tests) must be updated:
     # Version 3.x
     new_message = message.model_copy(update={"text": "edited"})
 
+The "input" types you build yourself and **send** to Telegram remain mutable — they
+inherit :code:`aiogram.types.base.MutableTelegramObject` (:code:`frozen=False`):
+:class:`~aiogram.types.inline_keyboard_button.InlineKeyboardButton`,
+:class:`~aiogram.types.keyboard_button.KeyboardButton`,
+the reply markup types,
+:class:`~aiogram.types.bot_command.BotCommand`,
+:class:`~aiogram.types.message_entity.MessageEntity`,
+:class:`~aiogram.types.chat_permissions.ChatPermissions`,
+the :code:`InputMedia*` family and others. Assigning to their fields still works.
+
 Optional list fields are :code:`None`, not :code:`[]`
 -----------------------------------------------------
 
 .. warning::
 
-    In v2, fields like :code:`message.entities`, :code:`message.photo`,
-    :code:`message.caption_entities`, :code:`message.new_chat_members` defaulted to
-    empty lists. In v3 they are :code:`None` when absent, matching the Bot API.
+    In v2, optional array fields defaulted to empty lists. In v3 they are
+    :code:`None` when absent, matching the Bot API. This is not specific to
+    :class:`~aiogram.types.message.Message` — it holds for **every** optional array
+    field on **every** type, and there are dozens of them across the API.
+
     Code like :code:`for entity in message.entities:` passes review and works on
     most messages, then raises :code:`TypeError` on the first message without
-    entities. Use:
+    entities. The same trap applies to any other type, for example
+    :attr:`~aiogram.types.chat.Chat.active_usernames`.
+    Always default the value:
 
     .. code-block:: python
 
         for entity in message.entities or []:
             ...
+
+        for username in chat.active_usernames or []:
+            ...
+
+Objects are compared by value, not by id
+-----------------------------------------
+
+.. warning::
+
+    This is a silent breakage with no error message at all.
+
+    In v2, :code:`User.__hash__` returned :code:`self.id` and
+    :code:`TelegramObject.__eq__` compared the class plus that hash, so two
+    :code:`User` objects describing the same person were **equal regardless of which
+    fields were filled in**.
+
+    In v3 there is no custom :code:`__eq__` / :code:`__hash__`: pydantic compares all
+    fields, and frozen models hash over the field values. Different API responses fill
+    in different subsets of fields — the :code:`from_user` of an update, an entry of
+    :code:`get_chat_administrators()` and the result of :code:`get_me()` are all
+    different objects for the same user — so comparisons that used to match now
+    silently stop matching:
+
+    .. code-block:: python
+
+        # Version 2.x — compared by user id
+        if user == await bot.me:
+            ...
+        if user in await bot.get_chat_administrators(chat_id):
+            ...
+
+    .. code-block:: python
+
+        # Version 3.x — compare ids explicitly
+        me = await bot.me()
+        if user.id == me.id:
+            ...
+
+        admins = await bot.get_chat_administrators(chat_id)
+        if user.id in {admin.user.id for admin in admins}:
+            ...
+
+    The same applies to deduplication: :code:`set[User]` and
+    :code:`dict[User, ...]` no longer collapse duplicates of the same user — build the
+    set over :code:`user.id` instead.
 
 The :code:`.bot` attribute and shortcut methods
 -----------------------------------------------
@@ -466,23 +639,40 @@ Exceptions
 Mapping (v2 -> v3)
 -------------------
 
-- RetryAfter -> :class:`TelegramRetryAfter` (:mod:`aiogram.exceptions`)
-  - Important attribute in v3: ``retry_after`` (int).
+All v3 exception classes live in :code:`aiogram.exceptions`.
 
-- ChatMigrated / MigrateToChat -> :class:`TelegramMigrateToChat`
-  - Important attribute in v3: ``migrate_to_chat_id`` (int).
+- :code:`RetryAfter` -> :class:`~aiogram.exceptions.TelegramRetryAfter`
+  (key attribute: :code:`retry_after`, int — renamed from v2 :code:`timeout`)
+- :code:`MigrateToChat` -> :class:`~aiogram.exceptions.TelegramMigrateToChat`
+  (key attribute: :code:`migrate_to_chat_id`, int — same name as in v2)
+- :code:`BadRequest` (and all of its many v2 subclasses)
+  -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`NotFound` -> :class:`~aiogram.exceptions.TelegramNotFound`
+- :code:`ConflictError` (including :code:`TerminatedByOtherGetUpdates`)
+  -> :class:`~aiogram.exceptions.TelegramConflictError`
+- :code:`NetworkError` -> :class:`~aiogram.exceptions.TelegramNetworkError`
+- :code:`RestartingTelegram` -> :class:`~aiogram.exceptions.RestartingTelegram`,
+  now a subclass of :class:`~aiogram.exceptions.TelegramServerError` (any other HTTP 5xx
+  response raises :class:`~aiogram.exceptions.TelegramServerError` itself)
+- :code:`Unauthorized` -> **split in two**, see below
 
-- ClientDecodeError -> :class:`ClientDecodeError`
-  - Important attributes in v3: ``original`` (Exception) and ``data`` (response body).
+The v2 :code:`Unauthorized` family covered two different HTTP statuses, and v3 keeps
+them apart:
 
-- BadRequest -> :class:`TelegramBadRequest`
-- Unauthorized -> :class:`TelegramUnauthorizedError`
-- Forbidden -> :class:`TelegramForbiddenError`
-- NotFound -> :class:`TelegramNotFound`
-- Conflict -> :class:`TelegramConflictError`
-- ServerError -> :class:`TelegramServerError`
-- NetworkError -> :class:`TelegramNetworkError`
-- EntityTooLarge -> :class:`TelegramEntityTooLarge`
+- an invalid or revoked bot token (HTTP 401)
+  -> :class:`~aiogram.exceptions.TelegramUnauthorizedError`
+- :code:`Forbidden: ...` responses (HTTP 403) — the bot was blocked by the user, kicked
+  from the chat, or the user was deactivated, i.e. v2 :code:`BotBlocked`,
+  :code:`BotKicked`, :code:`UserDeactivated`, :code:`CantInitiateConversation`
+  -> :class:`~aiogram.exceptions.TelegramForbiddenError`
+
+Two v3 classes have no v2 counterpart at all:
+
+- :class:`~aiogram.exceptions.TelegramEntityTooLarge` — HTTP 413, raised for file
+  uploads that exceed the server limit
+- :class:`~aiogram.exceptions.ClientDecodeError` — raised when the response body cannot
+  be decoded; carries :code:`original` (the underlying exception) and :code:`data`
+  (the raw response body)
 
 .. warning::
 
@@ -508,28 +698,52 @@ Mapping (v2 -> v3)
 Exceptions removed in v3 (from v2)
 ----------------------------------
 
-The list below contains common exception names that appeared in aiogram v2 but
-are not defined as separate classes in the v3 codebase. For each v2 name, a
-recommended v3 replacement (or handling) is provided — keep your migration
-logic simple and rely on the v3 exception classes and their attributes.
+v2 shipped around a hundred fine-grained exception classes that were detected by
+matching the error text (:code:`MessageNotModified`, :code:`ChatNotFound`, ...).
+None of them exist in v3: exceptions are classified **only by the HTTP status code**
+of the response, because Telegram does not document stable error codes.
 
-- MessageNotModified -> :class:`TelegramBadRequest`
-- MessageToEditNotFound -> :class:`TelegramNotFound`
-- MessageToDeleteNotFound -> :class:`TelegramNotFound`
-- MessageCantBeDeleted -> :class:`TelegramForbiddenError` / :class:`TelegramBadRequest`
-- CantParseEntities -> :class:`TelegramBadRequest`
-- MessageIsTooLong -> :class:`TelegramEntityTooLarge`
-- MessageIdentifierNotFound -> :class:`TelegramNotFound`
-- UserDeactivated -> :class:`TelegramForbiddenError`
-- CantInitiateConversation -> :class:`TelegramBadRequest`
-- StickerSetNameInvalid -> :class:`TelegramBadRequest`
-- ChatAdminRequired -> :class:`TelegramForbiddenError`
+The v2 class hierarchy tells you which v3 class replaces each name — everything that
+derived from v2 :code:`BadRequest` is HTTP 400, everything that derived from v2
+:code:`Unauthorized` is delivered by Telegram as :code:`Forbidden: ...` with HTTP 403:
 
-Use these replacements when migrating exception handling from v2 to v3. If
-you relied on catching very specific v2 exception classes, replace those
-handlers with the corresponding v3 class above (or catch a broader v3 class
-such as :class:`TelegramBadRequest` / :class:`TelegramAPIError`) and inspect
-available attributes (see "Mapping (v2 -> v3)") for any required details.
+- :code:`MessageNotModified` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`MessageToEditNotFound` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`MessageToDeleteNotFound` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`MessageCantBeDeleted` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`MessageIsTooLong` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`MessageIdentifierNotSpecified` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`CantParseEntities` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`ChatNotFound` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`InvalidQueryID` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`InvalidStickersSet` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`ChatAdminRequired` -> :class:`~aiogram.exceptions.TelegramBadRequest`
+- :code:`BotBlocked` -> :class:`~aiogram.exceptions.TelegramForbiddenError`
+- :code:`BotKicked` -> :class:`~aiogram.exceptions.TelegramForbiddenError`
+- :code:`UserDeactivated` -> :class:`~aiogram.exceptions.TelegramForbiddenError`
+- :code:`CantInitiateConversation` -> :class:`~aiogram.exceptions.TelegramForbiddenError`
+- :code:`TerminatedByOtherGetUpdates` -> :class:`~aiogram.exceptions.TelegramConflictError`
+- :code:`Throttled` -> removed together with the v2 throttling API
+  (see :ref:`Throttling <migration-throttling>`)
+
+.. note::
+
+    Because the classification is by status code only, several unrelated v2 names
+    collapse into a single v3 class. If you really need to distinguish a specific cause
+    inside :class:`~aiogram.exceptions.TelegramBadRequest`, match on the error text:
+
+    .. code-block:: python
+
+        from aiogram.exceptions import TelegramBadRequest
+
+        try:
+            await message.edit_text("Same text")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in e.message:
+                raise
+
+    Keep in mind that these texts are not part of the documented Bot API and may change,
+    so use the narrowest check you can and always re-raise what you did not expect.
 
 
 Error handlers
@@ -601,7 +815,7 @@ The entire v2 throttling API was removed **with no built-in replacement**:
 - the "bucket" API of FSM storages (:code:`get_bucket` / :code:`set_bucket`) —
   v3 storages keep only state and data
 
-The v3 approach is a middleware, optionally configured per-handler with
+The v3 approach is an **inner** middleware, optionally configured per-handler with
 :ref:`flags <flags>`:
 
 .. code-block:: python
@@ -626,6 +840,9 @@ The v3 approach is a middleware, optionally configured per-handler with
             event: Message,
             data: dict[str, Any],
         ) -> Any:
+            if event.from_user is None:  # channel posts have no sender
+                return await handler(event, data)
+
             rate = self.default_rate
             flag = get_flag(data, "rate_limit")
             if flag is not None:
@@ -651,6 +868,15 @@ The v3 approach is a middleware, optionally configured per-handler with
     async def handler(message: Message) -> None:
         ...
 
+.. warning::
+
+    Register this as an **inner** middleware, exactly as shown above
+    (:code:`router.message.middleware(...)`), not as an outer one
+    (:code:`router.message.outer_middleware(...)`). Handler flags are only available
+    after the handler has been resolved, which happens between the outer and the inner
+    middleware layers — in an outer middleware :code:`get_flag(data, "rate_limit")`
+    always returns :code:`None`, so every per-handler rate would be silently ignored.
+
 .. note::
 
     The example above keeps timestamps in an unbounded in-memory dict to stay short.
@@ -662,9 +888,10 @@ Keyboard Markup
 ===============
 
 - Now :class:`aiogram.types.inline_keyboard_markup.InlineKeyboardMarkup`
-  and :class:`aiogram.types.reply_keyboard_markup.ReplyKeyboardMarkup` no longer have methods for extension,
-  instead you have to use markup builders :class:`aiogram.utils.keyboard.ReplyKeyboardBuilder`
-  and :class:`aiogram.utils.keyboard.KeyboardBuilder` respectively
+  and :class:`aiogram.types.reply_keyboard_markup.ReplyKeyboardMarkup` no longer have methods
+  for extension, instead you have to use the markup builders
+  :class:`aiogram.utils.keyboard.InlineKeyboardBuilder`
+  and :class:`aiogram.utils.keyboard.ReplyKeyboardBuilder` respectively
   (:ref:`Read more » <Keyboard builder>`)
 - Buttons are constructed with keyword-only arguments now, see
   `Constructors of types and methods are keyword-only`_.
@@ -680,17 +907,15 @@ Callbacks data
 Finite State machine
 ====================
 
-- State filters will no longer be automatically added to all handlers;
-  you will need to specify the state if you want to use it.
-  Pay attention to the inverted default described in
+- State filters are no longer applied implicitly — see
   `Default state filter behavior is inverted`_.
 - Added the possibility to change the FSM strategy. For example,
   if you want to control the state for each user based on chat topics rather than
   the user in a chat, you can specify this in the |Dispatcher|.
-- Now :class:`aiogram.fsm.state.State` and :class:`aiogram.fsm.state.StateGroup` don't have helper
-  methods like :code:`.set()`, :code:`.next()`, etc.
+- Now :code:`aiogram.fsm.state.State` and :code:`aiogram.fsm.state.StatesGroup` don't have
+  helper methods like :code:`.set()`, :code:`.next()`, etc.
   Instead, you should set states by passing them directly to
-  :class:`aiogram.fsm.context.FSMContext` (:ref:`Read more » <Finite State Machine>`)
+  :code:`aiogram.fsm.context.FSMContext` (:ref:`Read more » <Finite State Machine>`)
 - The state proxy is deprecated; you should update the state data by calling
   :code:`state.set_data(...)` and :code:`state.get_data()` respectively.
 - Storages moved from :code:`aiogram.contrib.fsm_storage` to :code:`aiogram.fsm.storage`:
@@ -708,14 +933,37 @@ Storage keys and migrating live states (Redis)
     all live user states are silently "lost" after the deploy: the bot simply reads
     empty state for everyone. Verify key compatibility **before** switching over.
 
+    Note also that a topic-aware FSM strategy inserts an extra :code:`thread_id`
+    segment into the key (see below), so check the pattern against **real keys taken
+    from your traffic**, not only against the shape shown here.
+
 In v3 the storage key layout is controlled by a
 :class:`~aiogram.fsm.storage.base.KeyBuilder`. The default
-:class:`~aiogram.fsm.storage.base.DefaultKeyBuilder` produces::
+:class:`~aiogram.fsm.storage.base.DefaultKeyBuilder` produces:
+
+.. code-block:: text
+
+    <prefix>:<bot_id?>:<business_connection_id?>:<chat_id>:<thread_id?>:<user_id>:<destiny?>:<field>
+
+The segments marked with :code:`?` are conditional:
+
+- :code:`bot_id` — only with :code:`with_bot_id=True` (off by default)
+- :code:`business_connection_id` — only with :code:`with_business_connection_id=True`
+  and when the key actually carries one
+- :code:`thread_id` — whenever the key carries one, i.e. with the topic-aware FSM
+  strategies; this segment is **not** controlled by a builder option
+- :code:`destiny` — only with :code:`with_destiny=True`; without it, a non-default
+  destiny raises :code:`ValueError` instead of being silently dropped
+- :code:`field` — :code:`state`, :code:`data` or :code:`lock`
+
+With the default builder options and the default FSM strategy this reduces to:
+
+.. code-block:: text
 
     fsm:<chat_id>:<user_id>:state
     fsm:<chat_id>:<user_id>:data
 
-This happens to match the **default** v2 :code:`RedisStorage2` layout
+which matches the **default** v2 :code:`RedisStorage2` layout
 (:code:`fsm:<chat>:<user>:state`). But if your v2 setup used a custom
 :code:`prefix`, or the older v2 :code:`RedisStorage` (v1-style), the formats differ.
 Many v2 layouts can be reproduced by configuring the builder:
@@ -738,6 +986,9 @@ Notes:
 - :code:`with_bot_id=True` is recommended for **new** projects and required for
   multibot setups, but it changes the key format — don't enable it while you still
   need to read v2-era keys.
+- If you switch the dispatcher to a topic-aware FSM strategy, the keys grow a
+  :code:`thread_id` segment and stop matching your v2 keys — that is a separate
+  migration, not a drop-in change.
 - If your v2 format can't be reproduced (e.g. the old hash-based v2 :code:`RedisStorage`),
   implement a custom :class:`~aiogram.fsm.storage.base.KeyBuilder` or migrate the data
   with a one-off script.
@@ -786,22 +1037,18 @@ The whole :code:`aiogram.contrib` package is removed. Where its contents went:
 - :code:`aiogram.contrib.middlewares.logging.LoggingMiddleware` -> removed,
   use standard :mod:`logging` (see `Middlewares`_)
 - :code:`aiogram.contrib.middlewares.i18n.I18nMiddleware` -> :code:`aiogram.utils.i18n`
-  (see :ref:`below <migration-i18n>`)
+  (see :ref:`below <migration-i18n>` and :doc:`Translation </utils/i18n>`)
 
 Other utility changes:
 
 - :code:`aiogram.utils.json` (JSON library selection) is removed without replacement;
   aiogram handles serialization internally.
-- :code:`aiogram.utils.mixins` is **not** removed — contrary to a widespread belief:
-  :class:`~aiogram.utils.mixins.ContextInstanceMixin` is still there (and is used by
-  :class:`~aiogram.utils.i18n.core.I18n` itself). Custom classes built on it migrate
-  without changes. What *was* removed is the built-in context on |Bot|, |Dispatcher|
-  and Telegram types (see `Dispatcher`_).
+- :code:`aiogram.utils.mixins` and :code:`ContextInstanceMixin` still exist and custom
+  classes built on them migrate unchanged; what *was* removed is the built-in context on
+  |Bot|, |Dispatcher| and Telegram types (see `Dispatcher`_).
 - :code:`types.ChatActions` helpers are removed. Use the
-  :class:`aiogram.enums.ChatAction` enum with an explicit call, the
-  :class:`~aiogram.utils.chat_action.ChatActionSender` helper, or the
-  :class:`~aiogram.utils.chat_action.ChatActionMiddleware` with the
-  :code:`chat_action` flag:
+  :class:`aiogram.enums.chat_action.ChatAction` enum with an explicit call, or the
+  :class:`~aiogram.utils.chat_action.ChatActionSender` helper:
 
   .. code-block:: python
 
@@ -810,27 +1057,25 @@ Other utility changes:
 
   .. code-block:: python
 
-      # Version 3.x — plain call
+      # Version 3.x
       from aiogram.enums import ChatAction
 
       await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
-      # Version 3.x — keeps sending the action while the block runs
+  To keep the action alive for the duration of a long operation, use the context
+  manager:
+
+  .. code-block:: python
+
       from aiogram.utils.chat_action import ChatActionSender
 
       async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
           await long_operation()
 
-      # Version 3.x — via middleware + flag
-      from aiogram import flags
-      from aiogram.utils.chat_action import ChatActionMiddleware
-
-      router.message.middleware(ChatActionMiddleware())
-
-      @router.message(Command("render"))
-      @flags.chat_action("upload_photo")
-      async def handler(message: Message) -> None:
-          ...
+  The same thing can be done per handler with
+  :class:`~aiogram.utils.chat_action.ChatActionMiddleware` and the
+  :code:`@flags.chat_action(...)` decorator, following the same :ref:`flags <flags>`
+  mechanism shown in the `Throttling`_ section.
 
 .. _migration-i18n:
 
@@ -838,9 +1083,11 @@ I18n
 ----
 
 The i18n machinery moved from :code:`aiogram.contrib.middlewares.i18n` to
-:mod:`aiogram.utils.i18n` and the API changed completely — the v2
+:code:`aiogram.utils.i18n` and the API changed completely — the v2
 :code:`I18nMiddleware` with its :code:`trigger`/:code:`gettext` methods is replaced by
-the :class:`~aiogram.utils.i18n.core.I18n` core class plus a set of middlewares:
+the :code:`aiogram.utils.i18n.I18n` core class plus a set of middlewares.
+The canonical reference for the v3 API is :doc:`Translation </utils/i18n>`; this section
+only covers what changes when you come from v2.
 
 .. code-block:: python
 
@@ -873,7 +1120,7 @@ Lazy translations are available via :code:`aiogram.utils.i18n.lazy_gettext`.
 
 .. note::
 
-    :class:`~aiogram.utils.i18n.core.I18n` scans and loads locales **in its
+    :code:`I18n` scans and loads locales **in its
     constructor**. A :code:`.po` file without a compiled :code:`.mo` in the configured
     domain raises :code:`RuntimeError` immediately at startup (often at import time) —
     in v2 the same problem surfaced later. Make sure compiling catalogs
@@ -901,8 +1148,10 @@ Telegram objects transformation (to dict, to json, from json)
   have been removed due to the use of `pydantic <https://docs.pydantic.dev/>`_ models.
 - :code:`TelegramObject.to_object()` should be replaced by :code:`TelegramObject.model_validate()`
   (`Read more <https://docs.pydantic.dev/2.7/api/base_model/#pydantic.BaseModel.model_validate>`_)
-- :code:`TelegramObject.as_json()` should be replaced by :func:`aiogram.utils.serialization.deserialize_telegram_object_to_python`
-- :code:`<TelegramObject>.to_python()` should be replaced by :code:`json.dumps(deserialize_telegram_object_to_python(<TelegramObject>))`
+- :code:`<TelegramObject>.as_json()` (returned a :code:`str`) should be replaced by
+  :code:`json.dumps(deserialize_telegram_object_to_python(<TelegramObject>))`
+- :code:`<TelegramObject>.to_python()` (returned a :code:`dict`) should be replaced by
+  :func:`aiogram.utils.serialization.deserialize_telegram_object_to_python`
 
 Here are some usage examples:
 
