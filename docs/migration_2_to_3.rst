@@ -615,7 +615,8 @@ Objects are compared by value, not by id
         # Version 2.x — compared by user id
         if user == await bot.me:
             ...
-        if user in await bot.get_chat_administrators(chat_id):
+        admin_users = [m.user for m in await bot.get_chat_administrators(chat_id)]
+        if user in admin_users:  # worked in v2: Users matched by id
             ...
 
     .. code-block:: python
@@ -884,7 +885,9 @@ The v3 approach is an **inner** middleware, optionally configured per-handler wi
     class ThrottlingMiddleware(BaseMiddleware):
         def __init__(self, default_rate: float = 0.5) -> None:
             self.default_rate = default_rate
-            self.last_call: dict[int, float] = {}
+            # scoped per (user, handler): one handler's throttle must not
+            # suppress unrelated handlers, like v2's per-handler rate_limit
+            self.last_call: dict[tuple[int, Any], float] = {}
 
         async def __call__(
             self,
@@ -900,7 +903,7 @@ The v3 approach is an **inner** middleware, optionally configured per-handler wi
             if flag is not None:
                 rate = flag.get("rate", self.default_rate)
 
-            key = event.from_user.id
+            key = (event.from_user.id, data["handler"].callback)
             now = monotonic()
             last = self.last_call.get(key)
             if last is not None and now - last < rate:
@@ -1041,9 +1044,11 @@ Notes:
 - If you switch the dispatcher to a topic-aware FSM strategy, the keys grow a
   :code:`thread_id` segment and stop matching your v2 keys — that is a separate
   migration, not a drop-in change.
-- If your v2 format can't be reproduced (e.g. the old hash-based v2 :code:`RedisStorage`),
-  implement a custom :class:`~aiogram.fsm.storage.base.KeyBuilder` or migrate the data
-  with a one-off script.
+- A :class:`~aiogram.fsm.storage.base.KeyBuilder` only controls key **names**, not the
+  record layout. The old (non-2) v2 :code:`RedisStorage` stored one JSON blob
+  (:code:`{"state": ..., "data": ..., "bucket": ...}`) per :code:`fsm:<chat>:<user>`
+  key — no key builder can make v3 read that; the only path is a one-off script that
+  splits each record into the v3 :code:`...:state` / :code:`...:data` keys.
 - Keys of the third v2 record type — :code:`...:bucket` — belonged to the removed
   throttling API; v3 never reads them, so they can be deleted.
 - Check with :code:`redis-cli --scan --pattern 'fsm:*'` (or your prefix) that the v3 bot
@@ -1193,9 +1198,12 @@ The v2 helpers for answering directly in the webhook HTTP response —
 :code:`.get_response()` — were removed.
 
 - If you serve the webhook with aiogram's own aiohttp application
-  (:class:`~aiogram.webhook.aiohttp_server.SimpleRequestHandler`), this works out of
-  the box: return a method object from the handler, and it is serialized into the
-  webhook response automatically (including file uploads).
+  (:class:`~aiogram.webhook.aiohttp_server.SimpleRequestHandler`), return a method
+  object from the handler and it is serialized into the webhook response
+  (including file uploads) — but **only** with
+  :code:`SimpleRequestHandler(..., handle_in_background=False)`. The default is
+  :code:`handle_in_background=True`, which answers Telegram with an empty response
+  immediately and sends any returned method as a separate Bot API request instead.
 - If you plug aiogram into a **third-party web framework** (FastAPI, Sanic, ...),
   there is no public helper: build the payload yourself from any
   :code:`TelegramMethod` instance:
