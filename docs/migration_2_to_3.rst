@@ -47,6 +47,20 @@ Dependencies
 - Redis storage is now based on the `redis <https://pypi.org/project/redis/>`_ package
   (with asyncio support) instead of :code:`aioredis`.
 
+- aiogram 3.x is built on `pydantic <https://docs.pydantic.dev/>`_ v2. If your project
+  used pydantic v1 for its **own** models (settings, database schemas), upgrading
+  aiogram is often the moment pydantic v2 first enters the project — and some v1
+  patterns break **silently**: for example, :code:`Field(..., env="REDIS_URL")` is
+  ignored by pydantic v2 (:code:`BaseSettings` moved to the separate
+  :code:`pydantic-settings` package), so a config quietly stops reading environment
+  variables. Check your own models against the
+  `pydantic v1 -> v2 migration guide <https://docs.pydantic.dev/latest/migration/>`_.
+
+- Recent aiogram releases pin an **upper** Python bound as well (e.g.
+  :code:`>=3.10,<3.15` — check the current project metadata). With Poetry, a caret
+  constraint like :code:`python = "^3.11"` (which means :code:`<4.0`) then fails to
+  lock; use an explicitly bounded range such as :code:`>=3.11,<3.15`.
+
 
 Bot
 ===
@@ -343,6 +357,31 @@ filter now passes a :class:`~aiogram.filters.command.CommandObject` into the han
 Note that :code:`command.args` is :code:`None` (not an empty string) when the command
 has no arguments.
 
+Other removed :code:`Message` helpers
+-------------------------------------
+
+:code:`Message.is_command()`, :code:`Message.get_command()` and
+:code:`Message.is_forward()` were removed **without replacement**. Inside the
+dispatcher, use the :class:`~aiogram.filters.command.Command` filter and
+:class:`~aiogram.filters.command.CommandObject` instead. If you inspect updates
+*outside* the dispatcher (custom routing, raw update processing), reimplement the
+checks manually:
+
+.. code-block:: python
+
+    from aiogram.enums import MessageEntityType
+
+    def is_command(message: Message) -> bool:
+        entities = message.entities or []
+        return bool(
+            entities
+            and entities[0].type == MessageEntityType.BOT_COMMAND
+            and entities[0].offset == 0
+        )
+
+    def is_forward(message: Message) -> bool:
+        return message.forward_origin is not None
+
 Default state filter behavior is inverted
 -----------------------------------------
 
@@ -633,6 +672,16 @@ Forwarded messages: :code:`forward_from` is dead
 
         if isinstance(message.forward_origin, MessageOriginUser):
             original_sender = message.forward_origin.sender_user
+
+:code:`repr()` of objects is much larger now
+--------------------------------------------
+
+In v2, :code:`repr(message)` was compact; in v3, pydantic renders **every** field,
+including the ~150 :code:`None`-valued optional ones. Log statements like
+:code:`log.debug("Processing %r", message)` multiply log volume by orders of
+magnitude after migration — on busy bots this has a real storage/latency cost.
+Log selected fields (e.g. :code:`message.message_id`, :code:`message.chat.id`)
+instead of whole objects on hot paths.
 
 
 Exceptions
@@ -1136,6 +1185,34 @@ Webhook
 - The aiohttp web app configuration has been simplified.
 - By default, the ability to upload files has been added when you `make requests in response to updates <https://core.telegram.org/bots/faq#how-can-i-make-requests-in-response-to-updates>`_ (available for webhook only).
 
+Replying into the webhook response
+----------------------------------
+
+The v2 helpers for answering directly in the webhook HTTP response —
+:code:`aiogram.dispatcher.webhook.SendMessage`, :code:`DeleteMessage`, etc. with
+:code:`.get_response()` — were removed.
+
+- If you serve the webhook with aiogram's own aiohttp application
+  (:class:`~aiogram.webhook.aiohttp_server.SimpleRequestHandler`), this works out of
+  the box: return a method object from the handler, and it is serialized into the
+  webhook response automatically (including file uploads).
+- If you plug aiogram into a **third-party web framework** (FastAPI, Sanic, ...),
+  there is no public helper: build the payload yourself from any
+  :code:`TelegramMethod` instance:
+
+  .. code-block:: python
+
+      from aiogram.methods import TelegramMethod
+      from aiogram.utils.serialization import deserialize_telegram_object_to_python
+
+      def webhook_reply_payload(method: TelegramMethod) -> dict:
+          payload = deserialize_telegram_object_to_python(method)
+          payload["method"] = method.__api_method__
+          return payload
+
+  Note that file uploads cannot be answered this way (they require a multipart
+  response body); send them with a regular API call instead.
+
 
 Telegram API Server
 ===================
@@ -1155,6 +1232,18 @@ Telegram objects transformation (to dict, to json, from json)
   :code:`json.dumps(deserialize_telegram_object_to_python(<TelegramObject>))`
 - :code:`<TelegramObject>.to_python()` (returned a :code:`dict`) should be replaced by
   :func:`aiogram.utils.serialization.deserialize_telegram_object_to_python`
+
+.. warning::
+
+    The *obvious* pydantic replacement — bare :code:`model_dump()` — is **not**
+    equivalent to v2 :code:`to_python()` and silently changes the data shape:
+    it includes every unset optional field as :code:`None` (~150 keys for a
+    :class:`~aiogram.types.message.Message`) and returns :code:`datetime`/enum
+    values as Python objects rather than JSON primitives. Code that dumps objects
+    into MongoDB or an external API gets bloated documents and a different wire
+    format without a single error. Use
+    :func:`~aiogram.utils.serialization.deserialize_telegram_object_to_python`,
+    or at least :code:`model_dump(mode="json", exclude_none=True)`.
 
 Here are some usage examples:
 
@@ -1227,6 +1316,13 @@ Here are some usage examples:
 
 ChatMember tools
 ================
+
+.. note::
+
+    The tools below (:code:`ChatMemberAdapter`, :code:`ADMINS`, :code:`MEMBERS`)
+    were added in aiogram **3.9**; on earlier 3.x releases, use
+    :func:`isinstance` checks against the concrete :code:`ChatMember*` classes
+    directly.
 
 - Now :class:`aiogram.types.chat_member.ChatMember` no longer contains tools to resolve an object with the appropriate status.
 
