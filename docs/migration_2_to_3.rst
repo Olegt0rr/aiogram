@@ -551,17 +551,29 @@ Positional arguments of API calls now bind to different parameters
 
     This is the quiet counterpart of the rule above. **Calls** of Bot API methods and
     of type shortcuts still accept positional arguments — and that is exactly the
-    problem. Telegram keeps inserting new parameters into the middle of existing
-    signatures, so v2-era positional calls keep working, but every value lands in the
-    wrong parameter:
+    problem. New Bot API parameters were inserted into the middle of existing
+    signatures, so v2-era positional calls compile, but the values land in the wrong
+    parameters:
 
     - The second parameter of :code:`bot.edit_message_text()` is now
       :code:`business_connection_id` (it was :code:`chat_id` in v2), so
-      :code:`bot.edit_message_text(text, chat_id, message_id)` sends your chat id as a
-      business connection id.
+      :code:`bot.edit_message_text(text, chat_id, message_id)` misbinds every
+      argument after the first.
     - The second parameter of :meth:`aiogram.types.message.Message.answer` is now
       :code:`direct_messages_topic_id` (it was :code:`parse_mode` in v2), so
-      :code:`message.answer(text, "HTML")` passes the parse mode as a topic id.
+      :code:`message.answer(text, parse_mode)` passes the parse mode as a topic id.
+
+    How this fails depends on the values, and neither way is caught before the code
+    path actually runs:
+
+    - **Type-incompatible** bindings (an :code:`int` chat id into the
+      :code:`str | None` business connection id, :code:`"HTML"` into an
+      :code:`int | None` topic id) raise :code:`ValidationError` — loud, but only at
+      runtime, on the affected call.
+    - **Type-compatible** bindings pass silently: an :code:`"@username"` chat id is a
+      perfectly valid :code:`str` for :code:`business_connection_id`, and a wrapper
+      forwarding :code:`parse_mode=None` binds :code:`direct_messages_topic_id=None`
+      — the message is sent, just with formatting silently dropped.
 
     Pass **all** Bot API method arguments as keywords, and audit every positional call
     while migrating:
@@ -739,10 +751,12 @@ removed.
 
     In v3 the field is :code:`Message | InaccessibleMessage | None`. For old or
     deleted messages Telegram sends :class:`~aiogram.types.inaccessible_message.InaccessibleMessage`,
-    which carries only :code:`chat`/:code:`message_id`/:code:`date` and has **no**
-    shortcut methods — :code:`callback_query.message.edit_text(...)` raises
+    which carries only :code:`chat`/:code:`message_id`/:code:`date` and has no
+    **editing** shortcuts — :code:`callback_query.message.edit_text(...)` raises
     :code:`AttributeError` in Python before any API call is made, so the whole
-    v2-era "expired button" handling silently stops working. Check the type first:
+    v2-era "expired button" handling silently stops working.
+    (:code:`answer_*`/:code:`reply_*` send shortcuts *do* exist on
+    :code:`InaccessibleMessage` since aiogram 3.13.) Check the type first:
 
     .. code-block:: python
 
