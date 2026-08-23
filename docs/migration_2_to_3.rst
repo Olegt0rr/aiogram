@@ -176,10 +176,12 @@ schedule the work explicitly:
 
     import asyncio
 
+    background_tasks = set()
+
     @router.message(Command("slow"))
     async def handler(message: Message) -> None:
         task = asyncio.create_task(do_slow_work(message.chat.id))
-        background_tasks.add(task)  # keep a reference, tasks are weakly referenced
+        background_tasks.add(task)  # keep a reference to avoid premature garbage collection
         task.add_done_callback(background_tasks.discard)
 
 Note that an exception raised inside a detached task never reaches the aiogram error
@@ -762,8 +764,9 @@ The signature and registration of error handlers changed completely:
 .. code-block:: python
 
     # Version 3.x
+    from aiogram import F
     from aiogram.filters import ExceptionTypeFilter
-    from aiogram.types import ErrorEvent
+    from aiogram.types import ErrorEvent, Message
 
     @router.error(ExceptionTypeFilter(MyCustomError), F.update.message.as_("message"))
     async def my_error_handler(event: ErrorEvent, message: Message) -> None:
