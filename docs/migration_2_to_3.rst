@@ -646,6 +646,50 @@ Optional list fields are :code:`None`, not :code:`[]`
 
         allowed = set(webhook_info.allowed_updates or [])
 
+Unix timestamps became :code:`datetime`
+---------------------------------------
+
+.. warning::
+
+    v2 handled date fields inconsistently, per field. Some were parsed into
+    :code:`datetime` (:code:`Message.date`, :code:`Message.edit_date`,
+    :code:`ChatMember.until_date` were declared as :code:`fields.DateTimeField()`),
+    others stayed raw Unix integers (:code:`WebhookInfo.last_error_date`,
+    :code:`PassportFile.file_date` were plain :code:`fields.Field()` typed as
+    :code:`base.Integer`). In :code:`WebhookInfo` the two kinds sat next to each
+    other: :code:`last_error_date` was an :code:`int`, while
+    :code:`last_synchronization_error_date` right below it was a
+    :code:`datetime`.
+
+    In v3 **every** date field uses the same annotated type,
+    :code:`aiogram.types.custom.DateTime`, and pydantic parses the incoming Unix
+    timestamp into a timezone-**aware** :code:`datetime` in UTC
+    (:code:`message.date.tzinfo` is UTC). Serialization back to the Bot API converts
+    it to an :code:`int` again, so you never build timestamps by hand.
+
+    Every v2-era manual conversion therefore breaks with a :code:`TypeError` (the
+    exact message depends on the Python version), and only when that line actually
+    runs:
+
+    .. code-block:: python
+
+        # Version 2.x
+        last_error = datetime.utcfromtimestamp(webhook_info.last_error_date)
+
+    .. code-block:: python
+
+        # Version 3.x — the field is already a datetime
+        last_error = webhook_info.last_error_date
+
+        # ...and converting back is explicit:
+        timestamp = int(message.date.timestamp())
+
+    Watch for the mirror-image trap: since the values are timezone-aware,
+    comparing one with a naive :code:`datetime` raises
+    :code:`TypeError: can't compare offset-naive and offset-aware datetimes`.
+    Use an aware value on the other side of the comparison — e.g.
+    :code:`datetime.now(timezone.utc)` instead of :code:`datetime.utcnow()`.
+
 Objects are compared by value, not by id
 -----------------------------------------
 
@@ -751,8 +795,11 @@ removed.
 
     In v3 the field is :code:`Message | InaccessibleMessage | None`. For old or
     deleted messages Telegram sends :class:`~aiogram.types.inaccessible_message.InaccessibleMessage`,
-    which carries only :code:`chat`/:code:`message_id`/:code:`date` and has no
-    **editing** shortcuts — :code:`callback_query.message.edit_text(...)` raises
+    which carries only :code:`chat`/:code:`message_id`/:code:`date` (no message
+    content fields at all) and has no **editing or deleting** shortcuts
+    (:code:`edit_text`, :code:`edit_reply_markup`, :code:`edit_caption`,
+    :code:`delete`, :code:`forward`, :code:`pin`, …) —
+    :code:`callback_query.message.edit_text(...)` raises
     :code:`AttributeError` in Python before any API call is made, so the whole
     v2-era "expired button" handling silently stops working.
     (:code:`answer_*`/:code:`reply_*` send shortcuts *do* exist on
