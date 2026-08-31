@@ -1,1 +1,0 @@
-Added ``lowest-direct`` dependency resolution variant to the CI test matrix; Codecov upload names now include the resolution strategy to distinguish coverage reports.
